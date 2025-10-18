@@ -1,7 +1,11 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import tensorflow as tf
+from tensorflow.keras.models import load_model
 import numpy as np
+import base64
+import cv2
+import io
+from PIL import Image
 import os
 import logging
 
@@ -16,26 +20,59 @@ CORS(app)  # Enable CORS for all routes
 # Global variable to store the model
 model = None
 
-def load_model():
-    """Load the TensorFlow model from the model directory"""
+def load_cnn_model():
+    """Load the TensorFlow CNN model from the model directory"""
     global model
     try:
-        model_path = os.path.join(os.path.dirname(__file__), 'model', 'model.h5')
+        # Try to find the model file
+        model_dir = os.path.join(os.path.dirname(__file__), 'model')
+        possible_names = ['model.h5', 'eye_state_model.h5', 'eeg_eye_state_model.h5']
         
-        if not os.path.exists(model_path):
-            logger.error(f"Model file not found at: {model_path}")
-            logger.info("Please ensure model.h5 is placed in the /model directory")
+        model_path = None
+        for name in possible_names:
+            path = os.path.join(model_dir, name)
+            if os.path.exists(path):
+                model_path = path
+                break
+        
+        if not model_path:
+            logger.error(f"Model file not found in {model_dir}")
+            logger.info("Please ensure model.h5 or eye_state_model.h5 is in the /model directory")
             return False
         
-        model = tf.keras.models.load_model(model_path)
-        logger.info("Model loaded successfully!")
+        # Load model with compatibility for legacy Keras models
+        import tensorflow as tf
+        
+        # Try different loading methods for compatibility
+        try:
+            # Method 1: Load without compilation (works for most legacy models)
+            model = tf.keras.models.load_model(model_path, compile=False)
+            model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+        except Exception as e1:
+            logger.warning(f"Standard loading failed: {e1}")
+            try:
+                # Method 2: Load with legacy support
+                import h5py
+                with h5py.File(model_path, 'r') as f:
+                    model = tf.keras.models.load_model(model_path, compile=False, 
+                                                      custom_objects={'InputLayer': tf.keras.layers.InputLayer})
+                model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+            except Exception as e2:
+                logger.error(f"Legacy loading also failed: {e2}")
+                raise Exception(f"Could not load model with any method. Original error: {e1}")
+        
+        logger.info(f"✅ Model loaded successfully from: {os.path.basename(model_path)}")
+        logger.info(f"   Model input shape: {model.input_shape}")
+        logger.info(f"   Model output shape: {model.output_shape}")
         return True
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
+        logger.warning("⚠️  Model failed to load, but server will still start.")
+        logger.warning("   /predict endpoint will return errors until model is fixed.")
         return False
 
 # Load model on startup
-load_model()
+load_cnn_model()
 
 @app.route('/', methods=['GET'])
 def home():
@@ -49,7 +86,7 @@ def home():
 def predict():
     """
     Prediction endpoint
-    Expects JSON: { "values": [0.12, 0.3, -0.2, ...] }
+    Expects JSON: { "image": "<base64-encoded-image>" }
     Returns: { "state": "Open" or "Closed", "probability": float }
     """
     try:
@@ -62,41 +99,53 @@ def predict():
         # Get data from request
         data = request.get_json()
         
-        if not data or 'values' not in data:
+        if not data or 'image' not in data:
             return jsonify({
-                "error": "Invalid request. Expected JSON with 'values' key."
+                "error": "Invalid request. Expected JSON with 'image' key containing base64-encoded image."
             }), 400
         
-        # Extract values
-        values = data['values']
-        
-        if not isinstance(values, list):
+        # Decode base64 image
+        try:
+            img_data = base64.b64decode(data['image'])
+            img = Image.open(io.BytesIO(img_data))
+        except Exception as e:
             return jsonify({
-                "error": "'values' must be a list of numbers."
+                "error": f"Failed to decode image: {str(e)}"
             }), 400
         
-        # Convert to numpy array and reshape for model input
-        input_data = np.array(values).reshape(1, -1)
+        # Convert to grayscale
+        img = img.convert('L')
+        
+        # Resize to 24x24 (model input size)
+        img = img.resize((24, 24))
+        
+        # Convert to numpy array and normalize
+        img_array = np.array(img) / 255.0
+        
+        # Reshape for model: (1, 24, 24, 1)
+        img_array = np.expand_dims(img_array, axis=(0, -1))
         
         # Make prediction
-        prediction = model.predict(input_data, verbose=0)
+        prediction = model.predict(img_array, verbose=0)[0]
         
-        # Get probability (assuming binary classification)
-        probability = float(prediction[0][0])
-        
-        # Determine state based on probability threshold
-        # Threshold: > 0.5 = Closed (drowsy), <= 0.5 = Open (alert)
-        state = "Closed" if probability > 0.5 else "Open"
+        # Get the predicted class and probability
+        # Assuming model outputs [prob_closed, prob_open] or similar
+        if len(prediction) >= 2:
+            # Binary classification with 2 outputs
+            prob_open = float(prediction[1])
+            prob_closed = float(prediction[0])
+            state = "Open" if prob_open > prob_closed else "Closed"
+            probability = max(prob_open, prob_closed)
+        else:
+            # Single output (sigmoid)
+            probability = float(prediction[0])
+            state = "Closed" if probability > 0.5 else "Open"
         
         return jsonify({
             "state": state,
             "probability": round(probability, 4)
         }), 200
         
-    except ValueError as ve:
-        return jsonify({
-            "error": f"Invalid input data: {str(ve)}"
-        }), 400
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
         return jsonify({
@@ -127,6 +176,8 @@ def internal_error(error):
 
 if __name__ == '__main__':
     # Run the Flask app
-    port = int(os.environ.get('PORT', 5000))
+    # Default to port 5001 to avoid conflict with macOS AirPlay Receiver on port 5000
+    port = int(os.environ.get('PORT', 5001))
+    logger.info(f"🚀 Starting server on http://localhost:{port}")
     app.run(host='0.0.0.0', port=port, debug=False)
 

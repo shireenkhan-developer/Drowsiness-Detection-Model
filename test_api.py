@@ -7,7 +7,8 @@ import requests
 import json
 
 # Base URL (change if deploying to production)
-BASE_URL = "http://localhost:5000"
+# Using port 5001 to avoid conflict with macOS AirPlay Receiver on port 5000
+BASE_URL = "http://localhost:5001"
 
 def test_home():
     """Test the home endpoint"""
@@ -27,9 +28,23 @@ def test_predict():
     """Test the predict endpoint"""
     print("\n📍 Testing POST /predict endpoint...")
     
-    # Sample data - adjust based on your model's input shape
+    # Create a sample 24x24 grayscale image (simulating an eye)
+    import numpy as np
+    from PIL import Image
+    import base64
+    import io
+    
+    # Create a dummy 24x24 grayscale image
+    dummy_img = np.random.randint(0, 255, (24, 24), dtype=np.uint8)
+    img = Image.fromarray(dummy_img, mode='L')
+    
+    # Convert to base64
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    
     sample_data = {
-        "values": [0.12, 0.3, -0.2, 0.45, 0.67, 0.89, 0.23, 0.56, 0.34, 0.78, 0.45, 0.12, 0.89, 0.34]
+        "image": img_base64
     }
     
     response = requests.post(
@@ -52,6 +67,21 @@ def test_invalid_request():
     response = requests.post(
         f"{BASE_URL}/predict",
         json=invalid_data,
+        headers={"Content-Type": "application/json"}
+    )
+    
+    print(f"Status Code: {response.status_code}")
+    print(f"Response: {json.dumps(response.json(), indent=2)}")
+    
+    print("\n📍 Testing POST /predict with invalid base64...")
+    
+    invalid_base64 = {
+        "image": "not-a-valid-base64-image"
+    }
+    
+    response = requests.post(
+        f"{BASE_URL}/predict",
+        json=invalid_base64,
         headers={"Content-Type": "application/json"}
     )
     
