@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from tensorflow.keras.models import load_model
@@ -8,13 +8,18 @@ import io
 from PIL import Image
 import logging
 import os
+import sys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
-app = FastAPI(title="Drowsiness Detection API", version="1.0.0")
+app = FastAPI(
+    title="Drowsiness Detection API",
+    description="Real-time drowsiness detection using TensorFlow CNN",
+    version="1.0.0"
+)
 
 # Enable CORS
 app.add_middleware(
@@ -125,7 +130,7 @@ async def predict(request: PredictionRequest):
     try:
         # Check if model is loaded
         if model is None:
-            return {"state": "Error", "probability": 0.0}
+            raise HTTPException(status_code=503, detail="Model not loaded")
         
         # Decode base64 image
         try:
@@ -133,7 +138,7 @@ async def predict(request: PredictionRequest):
             img = Image.open(io.BytesIO(img_data))
         except Exception as e:
             logger.error(f"Failed to decode image: {str(e)}")
-            return {"state": "Error", "probability": 0.0}
+            raise HTTPException(status_code=400, detail="Invalid image data")
         
         # Convert to grayscale
         img = img.convert('L')
@@ -167,9 +172,11 @@ async def predict(request: PredictionRequest):
             "probability": round(probability, 4)
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
-        return {"state": "Error", "probability": 0.0}
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
