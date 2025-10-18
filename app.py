@@ -3,7 +3,6 @@ from flask_cors import CORS
 from tensorflow.keras.models import load_model
 import numpy as np
 import base64
-import cv2
 import io
 from PIL import Image
 import os
@@ -26,44 +25,27 @@ def load_cnn_model():
     try:
         # Try to find the model file
         model_dir = os.path.join(os.path.dirname(__file__), 'model')
-        possible_names = ['model.h5', 'eye_state_model.h5', 'eeg_eye_state_model.h5']
+        possible_names = ['eye_state_model.h5', 'model.h5', 'eeg_eye_state_model.h5']
         
         model_path = None
         for name in possible_names:
             path = os.path.join(model_dir, name)
-            if os.path.exists(path):
+            if os.path.exists(path) and os.path.getsize(path) > 0:
                 model_path = path
                 break
         
         if not model_path:
             logger.error(f"Model file not found in {model_dir}")
-            logger.info("Please ensure model.h5 or eye_state_model.h5 is in the /model directory")
+            logger.info("Please ensure eye_state_model.h5 is in the /model directory")
             return False
         
-        # Load model with compatibility for legacy Keras models
-        import tensorflow as tf
+        # Load the model (TensorFlow 2.8 supports batch_shape)
+        logger.info(f"Loading model from: {os.path.basename(model_path)}")
+        model = load_model(model_path)
         
-        # Try different loading methods for compatibility
-        try:
-            # Method 1: Load without compilation (works for most legacy models)
-            model = tf.keras.models.load_model(model_path, compile=False)
-            model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-        except Exception as e1:
-            logger.warning(f"Standard loading failed: {e1}")
-            try:
-                # Method 2: Load with legacy support
-                import h5py
-                with h5py.File(model_path, 'r') as f:
-                    model = tf.keras.models.load_model(model_path, compile=False, 
-                                                      custom_objects={'InputLayer': tf.keras.layers.InputLayer})
-                model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-            except Exception as e2:
-                logger.error(f"Legacy loading also failed: {e2}")
-                raise Exception(f"Could not load model with any method. Original error: {e1}")
-        
-        logger.info(f"✅ Model loaded successfully from: {os.path.basename(model_path)}")
-        logger.info(f"   Model input shape: {model.input_shape}")
-        logger.info(f"   Model output shape: {model.output_shape}")
+        logger.info(f"✅ Model loaded successfully!")
+        logger.info(f"   Input shape: {model.input_shape}")
+        logger.info(f"   Output shape: {model.output_shape}")
         return True
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
