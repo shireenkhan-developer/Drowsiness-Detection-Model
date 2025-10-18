@@ -39,9 +39,23 @@ def load_cnn_model():
             logger.info("Please ensure eye_state_model.h5 is in the /model directory")
             return False
         
-        # Load the model (TensorFlow 2.8 supports batch_shape)
+        # Load the model with custom InputLayer to handle batch_shape
         logger.info(f"Loading model from: {os.path.basename(model_path)}")
-        model = load_model(model_path)
+        
+        import tensorflow as tf
+        from tensorflow.keras.layers import InputLayer
+        
+        # Create custom InputLayer that converts batch_shape to input_shape
+        class CustomInputLayer(InputLayer):
+            def __init__(self, batch_shape=None, input_shape=None, **kwargs):
+                if batch_shape is not None:
+                    # Convert batch_shape to input_shape (remove batch dimension)
+                    input_shape = batch_shape[1:] if input_shape is None else input_shape
+                    kwargs.pop('batch_shape', None)  # Remove batch_shape from kwargs
+                super(CustomInputLayer, self).__init__(input_shape=input_shape, **kwargs)
+        
+        # Load model with custom object
+        model = load_model(model_path, custom_objects={'InputLayer': CustomInputLayer})
         
         logger.info(f"✅ Model loaded successfully!")
         logger.info(f"   Input shape: {model.input_shape}")
@@ -51,6 +65,8 @@ def load_cnn_model():
         logger.error(f"Error loading model: {str(e)}")
         logger.warning("⚠️  Model failed to load, but server will still start.")
         logger.warning("   /predict endpoint will return errors until model is fixed.")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 # Load model on startup
