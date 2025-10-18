@@ -14,7 +14,15 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+
+# Enable CORS with specific configuration for all origins and methods
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 
 # Global variable to store the model
 model = None
@@ -132,8 +140,10 @@ def predict():
         # Reshape for model: (1, 24, 24, 1)
         img_array = np.expand_dims(img_array, axis=(0, -1))
         
-        # Make prediction
-        prediction = model.predict(img_array, verbose=0)[0]
+        # Make prediction (use TensorFlow session properly for faster inference)
+        import tensorflow as tf
+        with tf.device('/CPU:0'):  # Force CPU to avoid GPU errors
+            prediction = model.predict(img_array, verbose=0, batch_size=1)[0]
         
         # Get the predicted class and probability
         # Assuming model outputs [prob_closed, prob_open] or similar
