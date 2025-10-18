@@ -44,6 +44,7 @@ def load_cnn_model():
         
         import tensorflow as tf
         from tensorflow.keras.layers import InputLayer
+        from tensorflow.keras.mixed_precision import Policy as DTypePolicy
         
         # Create custom InputLayer that converts batch_shape to input_shape
         class CustomInputLayer(InputLayer):
@@ -54,8 +55,16 @@ def load_cnn_model():
                     kwargs.pop('batch_shape', None)  # Remove batch_shape from kwargs
                 super(CustomInputLayer, self).__init__(input_shape=input_shape, **kwargs)
         
-        # Load model with custom object
-        model = load_model(model_path, custom_objects={'InputLayer': CustomInputLayer})
+        # Load model with custom objects for compatibility
+        custom_objects = {
+            'InputLayer': CustomInputLayer,
+            'DTypePolicy': DTypePolicy
+        }
+        
+        model = load_model(model_path, custom_objects=custom_objects, compile=False)
+        
+        # Recompile the model
+        model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
         
         logger.info(f"✅ Model loaded successfully!")
         logger.info(f"   Input shape: {model.input_shape}")
