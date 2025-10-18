@@ -1,31 +1,45 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from tensorflow.keras.models import load_model
 import numpy as np
 import base64
 import io
 from PIL import Image
-import os
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app
-app = Flask(__name__)
+# Initialize FastAPI app
+app = FastAPI(title="Drowsiness Detection API", version="1.0.0")
 
-# Enable CORS with specific configuration for all origins and methods
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (or specify your frontend URL)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Global variable to store the model
 model = None
+
+# Request model
+class PredictionRequest(BaseModel):
+    image: str  # base64 encoded image
+
+# Response model
+class PredictionResponse(BaseModel):
+    state: str
+    probability: float
+
+class HealthResponse(BaseModel):
+    message: str
+    model_loaded: bool
 
 def load_cnn_model():
     """Load the TensorFlow CNN model from the model directory"""
@@ -33,7 +47,7 @@ def load_cnn_model():
     try:
         # Try to find the model file
         model_dir = os.path.join(os.path.dirname(__file__), 'model')
-        possible_names = ['eye_state_model.h5', 'model.h5', 'eeg_eye_state_model.h5']
+        possible_names = ['eye_state_model.h5', 'model.h5']
         
         model_path = None
         for name in possible_names:
@@ -44,10 +58,9 @@ def load_cnn_model():
         
         if not model_path:
             logger.error(f"Model file not found in {model_dir}")
-            logger.info("Please ensure eye_state_model.h5 is in the /model directory")
             return False
         
-        # Load the model with custom InputLayer to handle batch_shape
+        # Load model with custom objects for compatibility
         logger.info(f"Loading model from: {os.path.basename(model_path)}")
         
         import tensorflow as tf
@@ -63,7 +76,6 @@ def load_cnn_model():
                     kwargs.pop('batch_shape', None)  # Remove batch_shape from kwargs
                 super(CustomInputLayer, self).__init__(input_shape=input_shape, **kwargs)
         
-        # Load model with custom objects for compatibility
         custom_objects = {
             'InputLayer': CustomInputLayer,
             'DTypePolicy': DTypePolicy
@@ -71,34 +83,40 @@ def load_cnn_model():
         
         model = load_model(model_path, custom_objects=custom_objects, compile=False)
         
-        # Recompile the model
-        model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-        
         logger.info(f"✅ Model loaded successfully!")
         logger.info(f"   Input shape: {model.input_shape}")
         logger.info(f"   Output shape: {model.output_shape}")
         return True
     except Exception as e:
         logger.error(f"Error loading model: {str(e)}")
-        logger.warning("⚠️  Model failed to load, but server will still start.")
-        logger.warning("   /predict endpoint will return errors until model is fixed.")
         import traceback
         logger.error(traceback.format_exc())
         return False
 
 # Load model on startup
-load_cnn_model()
+@app.on_event("startup")
+async def startup_event():
+    logger.info("🚀 Starting Drowsiness Detection API...")
+    load_cnn_model()
 
-@app.route('/', methods=['GET'])
-def home():
+@app.get("/", response_model=HealthResponse)
+async def home():
     """Health check endpoint"""
-    return jsonify({
+    return {
         "message": "Drowsiness Detection API is running 🚀",
         "model_loaded": model is not None
-    }), 200
+    }
 
-@app.route('/predict', methods=['POST'])
-def predict():
+@app.get("/health", response_model=HealthResponse)
+async def health():
+    """Additional health check endpoint for monitoring"""
+    return {
+        "message": "Healthy",
+        "model_loaded": model is not None
+    }
+
+@app.post("/predict", response_model=PredictionResponse)
+async def predict(request: PredictionRequest):
     """
     Prediction endpoint
     Expects JSON: { "image": "<base64-encoded-image>" }
@@ -107,26 +125,15 @@ def predict():
     try:
         # Check if model is loaded
         if model is None:
-            return jsonify({
-                "error": "Model not loaded. Please check server logs."
-            }), 500
-        
-        # Get data from request
-        data = request.get_json()
-        
-        if not data or 'image' not in data:
-            return jsonify({
-                "error": "Invalid request. Expected JSON with 'image' key containing base64-encoded image."
-            }), 400
+            return {"state": "Error", "probability": 0.0}
         
         # Decode base64 image
         try:
-            img_data = base64.b64decode(data['image'])
+            img_data = base64.b64decode(request.image)
             img = Image.open(io.BytesIO(img_data))
         except Exception as e:
-            return jsonify({
-                "error": f"Failed to decode image: {str(e)}"
-            }), 400
+            logger.error(f"Failed to decode image: {str(e)}")
+            return {"state": "Error", "probability": 0.0}
         
         # Convert to grayscale
         img = img.convert('L')
@@ -135,18 +142,15 @@ def predict():
         img = img.resize((24, 24))
         
         # Convert to numpy array and normalize
-        img_array = np.array(img) / 255.0
+        img_array = np.array(img, dtype=np.float32) / 255.0
         
         # Reshape for model: (1, 24, 24, 1)
         img_array = np.expand_dims(img_array, axis=(0, -1))
         
-        # Make prediction (use TensorFlow session properly for faster inference)
-        import tensorflow as tf
-        with tf.device('/CPU:0'):  # Force CPU to avoid GPU errors
-            prediction = model.predict(img_array, verbose=0, batch_size=1)[0]
+        # Make prediction
+        prediction = model.predict(img_array, verbose=0)[0]
         
         # Get the predicted class and probability
-        # Assuming model outputs [prob_closed, prob_open] or similar
         if len(prediction) >= 2:
             # Binary classification with 2 outputs
             prob_open = float(prediction[1])
@@ -158,43 +162,17 @@ def predict():
             probability = float(prediction[0])
             state = "Closed" if probability > 0.5 else "Open"
         
-        return jsonify({
+        return {
             "state": state,
             "probability": round(probability, 4)
-        }), 200
+        }
         
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
-        return jsonify({
-            "error": f"Prediction failed: {str(e)}"
-        }), 500
+        return {"state": "Error", "probability": 0.0}
 
-@app.route('/health', methods=['GET'])
-def health():
-    """Additional health check endpoint for monitoring"""
-    return jsonify({
-        "status": "healthy",
-        "model_loaded": model is not None
-    }), 200
-
-@app.errorhandler(404)
-def not_found(error):
-    """Handle 404 errors"""
-    return jsonify({
-        "error": "Endpoint not found"
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    """Handle 500 errors"""
-    return jsonify({
-        "error": "Internal server error"
-    }), 500
-
-if __name__ == '__main__':
-    # Run the Flask app
-    # Default to port 5001 to avoid conflict with macOS AirPlay Receiver on port 5000
-    port = int(os.environ.get('PORT', 5001))
-    logger.info(f"🚀 Starting server on http://localhost:{port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 

@@ -7,8 +7,8 @@ import requests
 import json
 
 # Base URL (change if deploying to production)
-# Using port 5001 to avoid conflict with macOS AirPlay Receiver on port 5000
-BASE_URL = "http://localhost:5001"
+# FastAPI with uvicorn on port 8000 (or 7860 for Hugging Face)
+BASE_URL = "http://localhost:8000"
 
 def test_home():
     """Test the home endpoint"""
